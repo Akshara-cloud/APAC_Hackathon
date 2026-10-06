@@ -86,21 +86,24 @@ def get_last_price(client: RoostooClient, pair: str) -> float:
 def get_balances(client: RoostooClient):
     try:
         response = client.get_balance()
-        if not response.get("Success", False):
-            logger.warning(
-                "Balance API failed or unauthorized: %s",
-                response.get("ErrMsg", response),
-            )
-            return 0.0, 0.0
-
-        wallet = response.get("Wallet") or response.get("SpotWallet", {})
-        usd = float(wallet.get("USD", {}).get("Free", 0))
-        coin = PAIR.split("/")[0]
-        coin_balance = float(wallet.get(coin, {}).get("Free", 0))
-        return usd, coin_balance
+        if isinstance(response, dict) and response.get("Success", False):
+            wallet = response.get("Wallet") or response.get("SpotWallet", {})
+            usd = float(wallet.get("USD", {}).get("Free", 0))
+            coin = PAIR.split("/")[0]
+            coin_balance = float(wallet.get(coin, {}).get("Free", 0))
+            return usd, coin_balance
+        else:
+            err_msg = response.get("ErrMsg", str(response)) if isinstance(response, dict) else str(response)
+            logger.warning("Balance API response unauthorized or failed: %s", err_msg)
     except Exception as e:
-        logger.warning("Could not fetch balance (%s). Returning 0.0 balances for test run.", e)
-        return 0.0, 0.0
+        logger.warning("Could not fetch balance from API (%s).", e)
+
+    fallback_usd = float(os.getenv("FALLBACK_USD_BALANCE", "0.0"))
+    if fallback_usd > 0:
+        logger.info("Using FALLBACK_USD_BALANCE = %.2f USD for order sizing.", fallback_usd)
+        return fallback_usd, 0.0
+
+    return 0.0, 0.0
 
 
 # ---------------------------------------------------------
@@ -190,14 +193,17 @@ def execute_signal(
             logger.info("DRY_RUN=True -> order NOT sent")
             return
 
-        response = client.place_order(
-            pair=PAIR,
-            side="BUY",
-            order_type="MARKET",
-            quantity=quantity,
-        )
-
-        logger.info("BUY response: %s", response)
+        try:
+            response = client.place_order(
+                pair=PAIR,
+                side="BUY",
+                order_type="MARKET",
+                quantity=quantity,
+            )
+            logger.info("BUY order response: %s", response)
+        except Exception as err:
+            logger.error("Failed to execute BUY order: %s", err)
+            logger.info("NOTE: Ensure API key is activated in Roostoo app and base URL is correct.")
 
     # -----------------------------------------------------
     # SELL
@@ -227,14 +233,18 @@ def execute_signal(
             logger.info("DRY_RUN=True -> order NOT sent")
             return
 
-        response = client.place_order(
-            pair=PAIR,
-            side="SELL",
-            order_type="MARKET",
-            quantity=quantity,
-        )
+        try:
+            response = client.place_order(
+                pair=PAIR,
+                side="SELL",
+                order_type="MARKET",
+                quantity=quantity,
+            )
+            logger.info("SELL order response: %s", response)
+        except Exception as err:
+            logger.error("Failed to execute SELL order: %s", err)
+            logger.info("NOTE: Ensure API key is activated in Roostoo app and base URL is correct.")
 
-        logger.info("SELL response: %s", response)
 
 
 # ---------------------------------------------------------
