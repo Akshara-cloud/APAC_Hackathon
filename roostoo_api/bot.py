@@ -5,6 +5,7 @@ import logging
 from collections import deque
 from decimal import Decimal, ROUND_DOWN
 
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Ensure module import works whether run from root or roostoo_api dir
@@ -13,7 +14,10 @@ try:
 except ModuleNotFoundError:
     from client import RoostooClient
 
-load_dotenv()
+# Load .env from project root relative to bot.py location
+env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
+load_dotenv()  # fallback to current working directory
 
 # ---------------------------------------------------------
 # Configuration
