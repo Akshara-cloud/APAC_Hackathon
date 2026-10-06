@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import logging
 from collections import deque
@@ -6,7 +7,11 @@ from decimal import Decimal, ROUND_DOWN
 
 from dotenv import load_dotenv
 
-from client import RoostooClient
+# Ensure module import works whether run from root or roostoo_api dir
+try:
+    from roostoo_api.client import RoostooClient
+except ModuleNotFoundError:
+    from client import RoostooClient
 
 load_dotenv()
 
@@ -16,19 +21,15 @@ load_dotenv()
 
 PAIR = "BTC/USD"
 
-# POLL_INTERVAL = 5 * 60      # 5 minutes
-# FAST_WINDOW = 5             # 25 minutes
-# SLOW_WINDOW = 20            # 100 minutes
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
+FAST_WINDOW = int(os.getenv("FAST_WINDOW", "3"))
+SLOW_WINDOW = int(os.getenv("SLOW_WINDOW", "6"))
 
-POLL_INTERVAL = 10
-FAST_WINDOW = 3
-SLOW_WINDOW = 6
-
-POSITION_SIZE = 0.10        # use 10% of available USD on a BUY
+POSITION_SIZE = float(os.getenv("POSITION_SIZE", "0.10"))  # use 10% of available USD on a BUY
 
 # Safety: keep this True while testing.
-# Change to False when you deliberately want live orders.
-DRY_RUN = True
+# Set DRY_RUN=False in .env when you deliberately want live orders.
+DRY_RUN = os.getenv("DRY_RUN", "True").lower() in ("true", "1", "yes")
 
 
 # ---------------------------------------------------------
@@ -49,9 +50,10 @@ logger = logging.getLogger(__name__)
 
 def get_quantity_precision(client: RoostooClient, pair: str) -> int:
     info = client.get_exchange_info()
-
-    trade_pair = info["TradePairs"][pair]
-    return int(trade_pair["AmountPrecision"])
+    trade_pairs = info.get("TradePairs", {})
+    if pair in trade_pairs:
+        return int(trade_pairs[pair].get("AmountPrecision", 4))
+    return 4
 
 
 def floor_quantity(quantity: float, precision: int) -> float:
@@ -71,70 +73,31 @@ def floor_quantity(quantity: float, precision: int) -> float:
 
 def get_last_price(client: RoostooClient, pair: str) -> float:
     response = client.get_ticker(pair)
+    data = response.get("Data", {})
+    if pair in data:
+        return float(data[pair]["LastPrice"])
+    raise KeyError(f"Pair '{pair}' not found in ticker response.")
 
-    return float(
-        response["Data"][pair]["LastPrice"]
-    )
-
-
-# def get_balances(client: RoostooClient):
-#     response = client.get_balance()
-
-#     wallet = response["Wallet"]
-
-#     usd = float(wallet.get("USD", {}).get("Free", 0))
-#     coin = PAIR.split("/")[0]
-#     coin_balance = float(wallet.get(coin, {}).get("Free", 0))
-
-#     return usd, coin_balance
-
-# def get_balances(client: RoostooClient):
-#     response = client.get_balance()
-
-#     logger.info("FULL BALANCE RESPONSE: %s", response)
-
-#     if not response.get("Success", False):
-#         raise RuntimeError(
-#             f"Balance API failed: {response.get('ErrMsg', 'Unknown error')}"
-#         )
-
-#     wallet = response.get("Wallet")
-
-#     if wallet is None:
-#         raise RuntimeError(
-#             f"Balance response has no 'Wallet' field: {response}"
-#         )
-
-#     usd = float(wallet.get("USD", {}).get("Free", 0))
-
-#     coin = PAIR.split("/")[0]
-#     coin_balance = float(
-#         wallet.get(coin, {}).get("Free", 0)
-#     )
-
-#     return usd, coin_balance
 
 def get_balances(client: RoostooClient):
-    response = client.get_balance()
+    try:
+        response = client.get_balance()
+        if not response.get("Success", False):
+            logger.warning(
+                "Balance API failed or unauthorized: %s",
+                response.get("ErrMsg", response),
+            )
+            return 0.0, 0.0
 
-    if not response.get("Success", False):
-        raise RuntimeError(
-            f"Balance API failed: {response.get('ErrMsg', 'Unknown error')}"
-        )
+        wallet = response.get("Wallet") or response.get("SpotWallet", {})
+        usd = float(wallet.get("USD", {}).get("Free", 0))
+        coin = PAIR.split("/")[0]
+        coin_balance = float(wallet.get(coin, {}).get("Free", 0))
+        return usd, coin_balance
+    except Exception as e:
+        logger.warning("Could not fetch balance (%s). Returning 0.0 balances for test run.", e)
+        return 0.0, 0.0
 
-    wallet = response.get("SpotWallet", {})
-
-    usd = float(
-        wallet.get("USD", {}).get("Free", 0)
-    )
-
-    coin = PAIR.split("/")[0]
-
-    coin_balance = float(
-        wallet.get(coin, {}).get("Free", 0)
-    )
-
-    return usd, coin_balance
 
 # ---------------------------------------------------------
 # Strategy
@@ -192,8 +155,6 @@ def execute_signal(
     # -----------------------------------------------------
 
     if signal == "BUY":
-
-        # Don't repeatedly buy if we already hold BTC.
         if coin_balance > 0:
             logger.info("Already holding BTC. Skipping BUY.")
             return
@@ -239,7 +200,6 @@ def execute_signal(
     # -----------------------------------------------------
 
     elif signal == "SELL":
-
         if coin_balance <= 0:
             logger.info("No BTC to sell. Skipping SELL.")
             return
@@ -278,17 +238,15 @@ def execute_signal(
 # ---------------------------------------------------------
 
 def main():
-
-    api_key = os.environ["ROOSTOO_API_KEY"]
-    secret_key = os.environ["ROOSTOO_API_SECRET"]
+    api_key = os.getenv("ROOSTOO_API_KEY") or os.getenv("ROOSTOO_TEST_API_KEY", "")
+    secret_key = os.getenv("ROOSTOO_SECRET_KEY") or os.getenv("ROOSTOO_API_SECRET", os.getenv("ROOSTOO_TEST_SECRET_KEY", ""))
+    base_url = os.getenv("ROOSTOO_BASE_URL", "https://mock-api.roostoo.com")
 
     client = RoostooClient(
         api_key=api_key,
         secret_key=secret_key,
+        base_url=base_url,
     )
-
-    exchange_info = client.get_exchange_info()
-    # logger.info("EXCHANGE INFO: %s", exchange_info)
 
     quantity_precision = get_quantity_precision(
         client,
@@ -297,12 +255,13 @@ def main():
 
     logger.info("Bot started")
     logger.info("Pair: %s", PAIR)
+    logger.info("Base URL: %s", base_url)
     logger.info("DRY_RUN: %s", DRY_RUN)
 
-    prices = deque(maxlen=SLOW_WINDOW)
+    # Note: maxlen must be at least SLOW_WINDOW + 1 for calculate_signal
+    prices = deque(maxlen=SLOW_WINDOW + 1)
 
     while True:
-
         try:
             price = get_last_price(
                 client,
@@ -312,9 +271,11 @@ def main():
             prices.append(price)
 
             logger.info(
-                "Current %s price = %.2f",
+                "Current %s price = %.2f (collected %d/%d prices)",
                 PAIR,
                 price,
+                len(prices),
+                SLOW_WINDOW + 1,
             )
 
             signal = calculate_signal(prices)
@@ -328,13 +289,6 @@ def main():
                     price,
                     quantity_precision,
                 )
-
-            execute_signal(
-                client,
-                signal,
-                price,
-                quantity_precision,
-            )
 
         except Exception:
             logger.exception(
